@@ -1,0 +1,1291 @@
+class TextGenerator:
+    """
+    Generate text using a fine-tuned model
+    """
+    def __init__(self, model_path, tokenizer_path, device="cuda"):
+        self.device = torch.device(device if torch.cuda.is_available() and device == "cuda" else "cpu")
+        print(f"Using device: {self.device}")
+        
+        # Load tokenizer
+        self.tokenizer = SimpleTokenizer.load(tokenizer_path)
+        print(f"Loaded tokenizer with vocabulary size: {len(self.tokenizer.token2id)}")
+        
+        # Load model
+        checkpoint = torch.load(model_path, map_location=self.device)
+        
+        if "model_config" in checkpoint:
+            config = checkpoint["model_config"]
+            
+            # Create model from configuration
+            self.model = GPT2LikeModel(
+                vocab_size=config["vocab_size"],
+                d_model=config["d_model"],
+                num_heads=config["num_heads"],
+                num_layers=config["num_layers"],
+                d_ff=config["d_ff"],
+                pad_idx=config["pad_idx"]
+            )
+        else:
+            # Fallback to default configuration
+            self.model = GPT2LikeModel(
+                vocab_size=len(self.tokenizer.token2id),
+                pad_idx=self.tokenizer.pad_token_id
+            )
+        
+        # Load model weights
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.model.to(self.device)
+        self.model.eval()
+        
+        print("Model loaded successfully")
+    
+    def generate(self, prompt, max_length=100, temperature=1.0, top_k=50, top_p=0.95, do_sample=True):
+        """
+        Generate text from a prompt
+        
+        Args:
+            prompt: Input text prompt
+            max_length: Maximum number of tokens to generate
+            temperature: Sampling temperature
+            top_k: Top-k sampling parameter
+            top_p: Top-p (nucleus) sampling parameter
+            do_sample: Whether to sample or use greedy decoding
+            
+        Returns:
+            Generated text
+        """
+        # Tokenize prompt
+        input_ids = torch.tensor([self.tokenizer.encode(prompt)]).to(self.device)
+        
+        # Generate text
+        with torch.no_grad():
+            output_ids = self.model.generate(
+                input_ids,
+                max_length=max_length,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                do_sample=do_sample
+            )
+        
+        # Get only the generated part (excluding the input)
+        generated_ids = output_ids[0, input_ids.shape[1]:]
+        
+        # Decode and return
+        generated_text = self.tokenizer.decode(generated_ids.tolist())
+        return generated_text
+
+def analyze_model_performance(model, tokenizer, test_texts, device, max_samples=100):
+    """
+    Analyze model performance on test data
+    
+    Args:
+        model: Trained model
+        tokenizer: Tokenizer
+        test_texts: List of test texts
+        device: Device to use
+        max_samples: Maximum number of samples to analyze
+        
+    Returns:
+        Dictionary with performance metrics
+    """
+    model.eval()
+    
+    # Limit number of samples
+    if len(test_texts) > max_samples:
+        test_texts = random.sample(test_texts, max_samples)
+    
+    # Create test dataset
+    test_dataset = TextDataset(test_texts, tokenizer)
+    test_dataloader = DataLoader(test_dataset, batch_size=8)
+    
+    # Evaluate on test data
+    test_loss, test_ppl = evaluate(model, test_dataloader, device)
+    
+    # Generate text from prompts
+    prompts = [text[:50] for text in test_texts[:5]]  # Take first 50 chars from 5 texts as prompts
+    generations = []
+    
+    for prompt in prompts:
+        input_ids = torch.tensor([tokenizer.encode(prompt)]).to(device)
+        
+        with torch.no_grad():
+            output_ids = model.generate(
+                input_ids,
+                max_length=50,
+                temperature=0.8,
+                top_k=50,
+                top_p=0.95,
+                do_sample=True
+            )
+        
+        generated_ids = output_ids[0, input_ids.shape[1]:]
+        generated_text = tokenizer.decode(generated_ids.tolist())
+        generations.append((prompt, generated_text))
+    
+    # Calculate metrics
+    results = {
+        "test_loss": test_loss,
+        "test_perplexity": test_ppl,
+        "sample_generations": generations
+    }
+    
+    return results
+
+def print_performance_report(performance_results):
+    """
+    Print a formatted performance report
+    
+    Args:
+        performance_results: Results from analyze_model_performance
+    """
+    print("\n" + "="*50)
+    print("MODEL PERFORMANCE REPORT")
+    print("="*50)
+    
+    print(f"\nTest Loss: {performance_results['test_loss']:.4f}")
+    print(f"Test Perplexity: {performance_results['test_perplexity']:.4f}")
+    
+    print("\nSAMPLE GENERATIONS:")
+    print("-"*50)
+    
+    for i, (prompt, generated) in enumerate(performance_results['sample_generations']):
+        print(f"\nSample {i+1}:")
+        print(f"Prompt: {prompt}")
+        print(f"Generated: {generated}")
+        print("-"*30)
+    
+    print("="*50)
+
+def main():
+    """Main function to demonstrate usage"""
+    parser = argparse.ArgumentParser(description="Train or use a transformer-based language model")
+    parser.add_argument("--mode", type=str, choices=["train", "generate", "evaluate"], default="train",
+                      help="Mode to run the script in")
+    parser.add_argument("--data", type=str, help="Path to training data file")
+    parser.add_argument("--model_path", type=str, default="fine_tuned_model/final_model.pt",
+                      help="Path to save/load model")
+    parser.add_argument("--tokenizer_path", type=str, default="fine_tuned_model/tokenizer.json",
+                      help="Path to save/load tokenizer")
+    parser.add_argument("--output_dir", type=str, default="fine_tuned_model",
+                      help="Directory to save model outputs")
+    parser.add_argument("--d_model", type=int, default=768, help="Model dimension")
+    parser.add_argument("--num_heads", type=int, default=12, help="Number of attention heads")
+    parser.add_argument("--num_layers", type=int, default=6, help="Number of transformer layers")
+    parser.add_argument("--batch_size", type=int, default=8, help="Batch size for training")
+    parser.add_argument("--num_epochs", type=int, default=5, help="Number of training epochs")
+    parser.add_argument("--lr", type=float, default=5e-5, help="Learning rate")
+    parser.add_argument("--max_length", type=int, default=512, help="Maximum sequence length")
+    parser.add_argument("--char_level", action="store_true", help="Use character-level tokenization")
+    parser.add_argument("--prompt", type=str, default="Once upon a time",
+                      help="Prompt for text generation")
+    parser.add_argument("--generate_length", type=int, default=100,
+                      help="Maximum length of generated text")
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
+                      help="Device to use (cuda or cpu)")
+    
+    args = parser.parse_args()
+    
+    if args.mode == "train":
+        # Load data
+        with open(args.data, 'r', encoding='utf-8') as f:
+            texts = f.readlines()
+        
+        # Fine-tune model
+        model, tokenizer, train_losses, val_losses = domain_adaptation_fine_tuning(
+            domain_texts=texts,
+            output_dir=args.output_dir,
+            device=args.device,
+            d_model=args.d_model,
+            num_heads=args.num_heads,
+            num_layers=args.num_layers,
+            batch_size=args.batch_size,
+            max_length=args.max_length,
+            lr=args.lr,
+            num_epochs=args.num_epochs,
+            char_level=args.char_level
+        )
+        
+        # Analyze performance
+        performance = analyze_model_performance(model, tokenizer, texts[-100:], args.device)
+        print_performance_report(performance)
+        
+    elif args.mode == "generate":
+        # Initialize text generator
+        generator = TextGenerator(args.model_path, args.tokenizer_path, args.device)
+        
+        # Generate text
+        generated_text = generator.generate(
+            args.prompt,
+            max_length=args.generate_length
+        )
+        
+        print(f"Prompt: {args.prompt}")
+        print(f"Generated: {generated_text}")
+        
+    elif args.mode == "evaluate":
+        # Load data
+        with open(args.data, 'r', encoding='utf-8') as f:
+            test_texts = f.readlines()
+        
+        # Initialize text generator
+        generator = TextGenerator(args.model_path, args.tokenizer_path, args.device)
+        
+        # Analyze performance
+        performance = analyze_model_performance(generator.model, generator.tokenizer, test_texts, args.device)
+        print_performance_report(performance)
+
+if __name__ == "__main__":
+    main()class DomainDataProcessor:
+    """
+    Process domain-specific data for fine-tuning
+    """
+    def __init__(self, base_tokenizer=None, max_vocab_size=50000, char_level=False):
+        self.base_tokenizer = base_tokenizer
+        self.max_vocab_size = max_vocab_size
+        self.char_level = char_level
+        self.domain_tokenizer = None
+    
+    def prepare_domain_data(self, domain_texts, train_ratio=0.9, max_length=512, stride=256, batch_size=8):
+        """
+        Prepare domain-specific data for fine-tuning
+        
+        Args:
+            domain_texts: List of domain-specific texts
+            train_ratio: Ratio of training data
+            max_length: Maximum sequence length
+            stride: Stride for sliding window
+            batch_size: Batch size for dataloaders
+            
+        Returns:
+            train_dataloader, val_dataloader, domain_tokenizer
+        """
+        print(f"Preparing domain data with {len(domain_texts)} texts")
+        
+        # Split into train and validation
+        train_size = int(len(domain_texts) * train_ratio)
+        train_texts = domain_texts[:train_size]
+        val_texts = domain_texts[train_size:]
+        
+        print(f"Train texts: {len(train_texts)}, Validation texts: {len(val_texts)}")
+        
+        # Create domain-specific tokenizer
+        if self.base_tokenizer:
+            # Use base tokenizer
+            self.domain_tokenizer = self.base_tokenizer
+        else:
+            # Create new tokenizer from domain data
+            print("Building domain-specific tokenizer...")
+            self.domain_tokenizer = SimpleTokenizer(
+                train_texts, 
+                vocab_size=self.max_vocab_size, 
+                char_level=self.char_level
+            )
+        
+        # Create datasets
+        print("Creating datasets...")
+        train_dataset = TextDataset(train_texts, self.domain_tokenizer, max_length, stride)
+        val_dataset = TextDataset(val_texts, self.domain_tokenizer, max_length, stride)
+        
+        print(f"Train dataset size: {len(train_dataset)}, Validation dataset size: {len(val_dataset)}")
+        
+        # Create dataloaders
+        train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        val_dataloader = DataLoader(val_dataset, batch_size=batch_size)
+        
+        return train_dataloader, val_dataloader, self.domain_tokenizer
+
+def domain_adaptation_fine_tuning(base_model_path=None, domain_texts=None, domain_data_path=None, 
+                                 output_dir="fine_tuned_model", device="cuda",
+                                 d_model=768, num_heads=12, num_layers=6, d_ff=3072,
+                                 batch_size=8, max_length=512, stride=256,
+                                 lr=5e-5, num_epochs=5, max_vocab_size=50000,
+                                 char_level=False):
+    """
+    Fine-tune a transformer model on domain-specific data
+    
+    Args:
+        base_model_path: Path to pre-trained model (optional)
+        domain_texts: List of domain-specific texts (optional)
+        domain_data_path: Path to domain-specific data file (optional)
+        output_dir: Directory to save fine-tuned model
+        device: Device to use for training (cuda or cpu)
+        d_model: Model dimension
+        num_heads: Number of attention heads
+        num_layers: Number of transformer layers
+        d_ff: Feed-forward dimension
+        batch_size: Batch size for training
+        max_length: Maximum sequence length
+        stride: Stride for sliding window
+        lr: Learning rate
+        num_epochs: Number of training epochs
+        max_vocab_size: Maximum vocabulary size
+        char_level: Whether to use character-level tokenization
+        
+    Returns:
+        Fine-tuned model, tokenizer, train_losses, val_losses
+    """
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Set device
+    device = torch.device(device if torch.cuda.is_available() and device == "cuda" else "cpu")
+    print(f"Using device: {device}")
+    
+    # Load domain data
+    if domain_data_path and not domain_texts:
+        print(f"Loading domain data from {domain_data_path}")
+        with open(domain_data_path, 'r', encoding='utf-8') as f:
+            domain_texts = f.readlines()
+    
+    if not domain_texts:
+        raise ValueError("Domain texts must be provided either directly or through a file path")
+    
+    # Process domain data
+    data_processor = DomainDataProcessor(max_vocab_size=max_vocab_size, char_level=char_level)
+    train_dataloader, val_dataloader, tokenizer = data_processor.prepare_domain_data(
+        domain_texts, max_length=max_length, stride=stride, batch_size=batch_size
+    )
+    
+    # Save tokenizer
+    tokenizer_path = os.path.join(output_dir, "tokenizer.json")
+    tokenizer.save(tokenizer_path)
+    print(f"Tokenizer saved to {tokenizer_path}")
+    
+    # Create or load model
+    vocab_size = len(tokenizer.token2id)
+    if base_model_path:
+        print(f"Loading base model from {base_model_path}")
+        checkpoint = torch.load(base_model_path, map_location=device)
+        
+        # Extract model configuration from checkpoint if available
+        if "model_config" in checkpoint:
+            config = checkpoint["model_config"]
+            d_model = config.get("d_model", d_model)
+            num_heads = config.get("num_heads", num_heads)
+            num_layers = config.get("num_layers", num_layers)
+            d_ff = config.get("d_ff", d_ff)
+        
+        model = GPT2LikeModel(
+            vocab_size=vocab_size, 
+            d_model=d_model, 
+            num_heads=num_heads, 
+            d_ff=d_ff, 
+            num_layers=num_layers,
+            pad_idx=tokenizer.pad_token_id
+        )
+        
+        # Load weights that match the model architecture
+        # This may require adaptation if vocabulary size changes
+        model_dict = model.state_dict()
+        pretrained_dict = {k: v for k, v in checkpoint["model_state_dict"].items() if k in model_dict and v.shape == model_dict[k].shape}
+        model_dict.update(pretrained_dict)
+        model.load_state_dict(model_dict)
+        
+        print(f"Loaded {len(pretrained_dict)}/{len(model_dict)} layers from pretrained model")
+    else:
+        print("Creating new model")
+        model = GPT2LikeModel(
+            vocab_size=vocab_size, 
+            d_model=d_model, 
+            num_heads=num_heads, 
+            d_ff=d_ff, 
+            num_layers=num_layers,
+            pad_idx=tokenizer.pad_token_id
+        )
+    
+    # Move model to device
+    model = model.to(device)
+    
+    # Count parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Model has {total_params:,} parameters")
+    
+    # Optimizer and scheduler
+    optimizer = Adam(model.parameters(), lr=lr)
+    scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs * len(train_dataloader))
+    
+    # Fine-tune model
+    checkpoint_path = os.path.join(output_dir, "model_checkpoint.pt")
+    train_losses, val_losses = fine_tune(
+        model, train_dataloader, val_dataloader, optimizer, scheduler, 
+        device, num_epochs=num_epochs, checkpoint_path=checkpoint_path
+    )
+    
+    # Load best model
+    model = load_best_model(model, checkpoint_path, device)
+    
+    # Save model configuration
+    model_config = {
+        "vocab_size": vocab_size,
+        "d_model": d_model,
+        "num_heads": num_heads,
+        "num_layers": num_layers,
+        "d_ff": d_ff,
+        "pad_idx": tokenizer.pad_token_id,
+        "max_length": max_length
+    }
+    
+    # Save final model with configuration
+    final_model_path = os.path.join(output_dir, "final_model.pt")
+    torch.save({
+        "model_state_dict": model.state_dict(),
+        "model_config": model_config
+    }, final_model_path)
+    print(f"Final model saved to {final_model_path}")
+    
+    return model, tokenizer, train_losses, val_lossesdef evaluate(model, dataloader, device):
+    """Evaluate model on validation or test data"""
+    model.eval()
+    total_loss = 0
+    total_tokens = 0
+    
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Evaluating"):
+            # Move batch to device
+            input_ids = batch["input_ids"].to(device)
+            labels = batch["labels"].to(device)
+            
+            # Forward pass
+            loss, _ = model(input_ids, labels)
+            
+            # Track loss
+            batch_loss = loss.item()
+            batch_tokens = (labels != model.pad_idx).sum().item()
+            total_loss += batch_loss * batch_tokens
+            total_tokens += batch_tokens
+    
+    avg_loss = total_loss / total_tokens if total_tokens > 0 else float('inf')
+    perplexity = math.exp(min(avg_loss, 20))  # Cap perplexity to avoid overflow
+    
+    return avg_loss, perplexity
+
+def fine_tune(model, train_dataloader, val_dataloader, optimizer, scheduler, device, num_epochs=3, clip_grad=1.0, checkpoint_path="checkpoint.pt", patience=3):
+    """Fine-tune the model and save the best checkpoint"""
+    best_val_loss = float('inf')
+    no_improvement = 0
+    
+    train_losses = []
+    val_losses = []
+    
+    for epoch in range(num_epochs):
+        print(f"\nEpoch {epoch+1}/{num_epochs}")
+        
+        # Train for one epoch
+        train_loss, train_ppl = train_epoch(model, train_dataloader, optimizer, scheduler, device, clip_grad)
+        train_losses.append(train_loss)
+        
+        print(f"Train loss: {train_loss:.4f}, Train perplexity: {train_ppl:.4f}")
+        
+        # Evaluate on validation set
+        val_loss, val_ppl = evaluate(model, val_dataloader, device)
+        val_losses.append(val_loss)
+        
+        print(f"Validation loss: {val_loss:.4f}, Validation perplexity: {val_ppl:.4f}")
+        
+        # Save checkpoint if validation loss improved
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            no_improvement = 0
+            
+            # Save model
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'train_loss': train_loss,
+                'val_loss': val_loss,
+            }, checkpoint_path)
+            
+            print(f"Checkpoint saved to {checkpoint_path}")
+        else:
+            no_improvement += 1
+            print(f"No improvement for {no_improvement} epochs")
+            
+            if no_improvement >= patience:
+                print(f"Early stopping after {epoch+1} epochs")
+                break
+    
+    # Plot training and validation loss
+    plt.figure(figsize=(10, 6))
+    plt.plot(train_losses, label='Train Loss')
+    plt.plot(val_losses, label='Validation Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss')
+    plt.legend()
+    plt.savefig('loss_plot.png')
+    plt.close()
+    
+    return train_losses, val_losses
+
+def load_best_model(model, checkpoint_path, device):
+    """Load best model from checkpoint"""
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    return modelimport os
+import math
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+from torch.optim import Adam
+from torch.optim.lr_scheduler import CosineAnnealingLR
+import numpy as np
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+from collections import Counter
+import random
+import json
+import argparse
+from typing import Dict, List, Tuple, Optional, Union
+
+class PositionalEncoding(nn.Module):
+    """
+    Implements positional encoding as described in 'Attention Is All You Need'
+    """
+    def __init__(self, d_model: int, max_seq_length: int = 5000, dropout: float = 0.1):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        
+        # Create positional encoding matrix
+        pe = torch.zeros(max_seq_length, d_model)
+        position = torch.arange(0, max_seq_length, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        
+        # Register buffer (persistent state)
+        self.register_buffer('pe', pe)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input embeddings tensor of shape [batch_size, seq_length, embedding_dim]
+            
+        Returns:
+            Output tensor of same shape with positional encoding added
+        """
+        x = x + self.pe[:, :x.size(1), :]
+        return self.dropout(x)
+
+class MultiHeadAttention(nn.Module):
+    """
+    Multi-head attention mechanism allowing the model to focus on different parts
+    of the input sequence simultaneously
+    """
+    def __init__(self, d_model: int, num_heads: int, dropout: float = 0.1):
+        super().__init__()
+        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+        
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_k = d_model // num_heads
+        
+        # Linear projections
+        self.W_q = nn.Linear(d_model, d_model)
+        self.W_k = nn.Linear(d_model, d_model)
+        self.W_v = nn.Linear(d_model, d_model)
+        self.W_o = nn.Linear(d_model, d_model)
+        
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, 
+                query: torch.Tensor, 
+                key: torch.Tensor, 
+                value: torch.Tensor, 
+                mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Args:
+            query: Query tensor [batch_size, seq_length, d_model]
+            key: Key tensor [batch_size, seq_length, d_model]
+            value: Value tensor [batch_size, seq_length, d_model]
+            mask: Optional mask tensor [batch_size, 1, seq_length, seq_length]
+            
+        Returns:
+            Output tensor [batch_size, seq_length, d_model]
+        """
+        batch_size = query.size(0)
+        
+        # Linear projections and reshape
+        q = self.W_q(query).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
+        k = self.W_k(key).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
+        v = self.W_v(value).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
+        
+        # Scaled dot-product attention
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.d_k)
+        
+        # Apply mask if provided
+        if mask is not None:
+            scores = scores.masked_fill(mask == 0, -1e9)
+        
+        # Apply softmax to get attention weights
+        attention_weights = F.softmax(scores, dim=-1)
+        attention_weights = self.dropout(attention_weights)
+        
+        # Apply attention weights to values
+        attention_output = torch.matmul(attention_weights, v)
+        
+        # Reshape and apply output projection
+        attention_output = attention_output.transpose(1, 2).contiguous().view(batch_size, -1, self.d_model)
+        output = self.W_o(attention_output)
+        
+        return output
+
+class FeedForward(nn.Module):
+    """
+    Position-wise feed-forward network with two linear transformations
+    """
+    def __init__(self, d_model: int, d_ff: int, dropout: float = 0.1):
+        super().__init__()
+        self.linear1 = nn.Linear(d_model, d_ff)
+        self.linear2 = nn.Linear(d_ff, d_model)
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor [batch_size, seq_length, d_model]
+            
+        Returns:
+            Output tensor [batch_size, seq_length, d_model]
+        """
+        return self.linear2(self.dropout(F.gelu(self.linear1(x))))
+
+class TransformerEncoderLayer(nn.Module):
+    """
+    Transformer encoder layer with self-attention and feed-forward network
+    """
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1):
+        super().__init__()
+        self.self_attention = MultiHeadAttention(d_model, num_heads, dropout)
+        self.feed_forward = FeedForward(d_model, d_ff, dropout)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor [batch_size, seq_length, d_model]
+            mask: Optional attention mask
+            
+        Returns:
+            Output tensor [batch_size, seq_length, d_model]
+        """
+        # Self-attention with residual connection and layer normalization
+        attn_output = self.self_attention(x, x, x, mask)
+        x = self.norm1(x + self.dropout1(attn_output))
+        
+        # Feed-forward with residual connection and layer normalization
+        ff_output = self.feed_forward(x)
+        x = self.norm2(x + self.dropout2(ff_output))
+        
+        return x
+
+class TransformerDecoderLayer(nn.Module):
+    """
+    Transformer decoder layer with self-attention, encoder-decoder attention, and feed-forward network
+    """
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1):
+        super().__init__()
+        self.self_attention = MultiHeadAttention(d_model, num_heads, dropout)
+        self.cross_attention = MultiHeadAttention(d_model, num_heads, dropout)
+        self.feed_forward = FeedForward(d_model, d_ff, dropout)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.norm3 = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        self.dropout3 = nn.Dropout(dropout)
+        
+    def forward(self, 
+                x: torch.Tensor, 
+                memory: torch.Tensor, 
+                tgt_mask: Optional[torch.Tensor] = None,
+                memory_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor [batch_size, seq_length, d_model]
+            memory: Output from encoder [batch_size, src_seq_length, d_model]
+            tgt_mask: Mask for target sequence
+            memory_mask: Mask for source sequence
+            
+        Returns:
+            Output tensor [batch_size, seq_length, d_model]
+        """
+        # Self-attention with residual connection and layer normalization
+        attn_output = self.self_attention(x, x, x, tgt_mask)
+        x = self.norm1(x + self.dropout1(attn_output))
+        
+        # Cross-attention with residual connection and layer normalization
+        cross_attn_output = self.cross_attention(x, memory, memory, memory_mask)
+        x = self.norm2(x + self.dropout2(cross_attn_output))
+        
+        # Feed-forward with residual connection and layer normalization
+        ff_output = self.feed_forward(x)
+        x = self.norm3(x + self.dropout3(ff_output))
+        
+        return x
+
+class TransformerEncoder(nn.Module):
+    """
+    Full transformer encoder with multiple encoder layers
+    """
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, num_layers: int, dropout: float = 0.1):
+        super().__init__()
+        self.layers = nn.ModuleList([
+            TransformerEncoderLayer(d_model, num_heads, d_ff, dropout)
+            for _ in range(num_layers)
+        ])
+        self.norm = nn.LayerNorm(d_model)
+        
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor [batch_size, seq_length, d_model]
+            mask: Optional attention mask
+            
+        Returns:
+            Output tensor [batch_size, seq_length, d_model]
+        """
+        for layer in self.layers:
+            x = layer(x, mask)
+        
+        return self.norm(x)
+
+class TransformerDecoder(nn.Module):
+    """
+    Full transformer decoder with multiple decoder layers
+    """
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, num_layers: int, dropout: float = 0.1):
+        super().__init__()
+        self.layers = nn.ModuleList([
+            TransformerDecoderLayer(d_model, num_heads, d_ff, dropout)
+            for _ in range(num_layers)
+        ])
+        self.norm = nn.LayerNorm(d_model)
+        
+    def forward(self, 
+                x: torch.Tensor, 
+                memory: torch.Tensor, 
+                tgt_mask: Optional[torch.Tensor] = None,
+                memory_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor [batch_size, seq_length, d_model] 
+            memory: Output from encoder [batch_size, src_seq_length, d_model]
+            tgt_mask: Mask for target sequence
+            memory_mask: Mask for source sequence
+            
+        Returns:
+            Output tensor [batch_size, seq_length, d_model]
+        """
+        for layer in self.layers:
+            x = layer(x, memory, tgt_mask, memory_mask)
+        
+        return self.norm(x)
+
+class Transformer(nn.Module):
+    """
+    Complete transformer model with encoder and decoder
+    """
+    def __init__(self, 
+                 src_vocab_size: int,
+                 tgt_vocab_size: int,
+                 d_model: int = 512, 
+                 num_heads: int = 8, 
+                 d_ff: int = 2048, 
+                 num_encoder_layers: int = 6,
+                 num_decoder_layers: int = 6,
+                 dropout: float = 0.1,
+                 pad_idx: int = 0):
+        super().__init__()
+        
+        self.d_model = d_model
+        self.pad_idx = pad_idx
+        
+        # Token embeddings
+        self.src_embedding = nn.Embedding(src_vocab_size, d_model, padding_idx=pad_idx)
+        self.tgt_embedding = nn.Embedding(tgt_vocab_size, d_model, padding_idx=pad_idx)
+        
+        # Positional encoding
+        self.pos_encoding = PositionalEncoding(d_model, dropout=dropout)
+        
+        # Encoder and decoder
+        self.encoder = TransformerEncoder(d_model, num_heads, d_ff, num_encoder_layers, dropout)
+        self.decoder = TransformerDecoder(d_model, num_heads, d_ff, num_decoder_layers, dropout)
+        
+        # Final linear layer
+        self.output_layer = nn.Linear(d_model, tgt_vocab_size)
+        
+        # Initialize parameters
+        self._init_parameters()
+        
+    def _init_parameters(self):
+        """Initialize model parameters"""
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+    
+    def create_padding_mask(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Create mask for padding tokens
+        
+        Args:
+            x: Input tensor [batch_size, seq_length]
+            
+        Returns:
+            Mask tensor [batch_size, 1, 1, seq_length]
+        """
+        # Create mask for pad tokens (1 for non-pad, 0 for pad)
+        mask = (x != self.pad_idx).unsqueeze(1).unsqueeze(2)
+        return mask
+    
+    def create_causal_mask(self, size: int) -> torch.Tensor:
+        """
+        Create causal mask to prevent attention to future tokens
+        
+        Args:
+            size: Sequence length
+            
+        Returns:
+            Causal mask [1, size, size]
+        """
+        mask = torch.triu(torch.ones(size, size), diagonal=1).unsqueeze(0)
+        return (1 - mask).bool()
+    
+    def forward(self, 
+                src: torch.Tensor, 
+                tgt: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass through the transformer
+        
+        Args:
+            src: Source tokens [batch_size, src_seq_length]
+            tgt: Target tokens [batch_size, tgt_seq_length]
+            
+        Returns:
+            Output tensor [batch_size, tgt_seq_length, tgt_vocab_size]
+        """
+        # Create masks
+        src_mask = self.create_padding_mask(src)
+        tgt_mask = self.create_padding_mask(tgt) & self.create_causal_mask(tgt.size(1)).to(tgt.device)
+        
+        # Embed inputs
+        src_embedded = self.src_embedding(src) * math.sqrt(self.d_model)
+        tgt_embedded = self.tgt_embedding(tgt) * math.sqrt(self.d_model)
+        
+        # Add positional encoding
+        src_encoded = self.pos_encoding(src_embedded)
+        tgt_encoded = self.pos_encoding(tgt_embedded)
+        
+        # Encoder and decoder
+        memory = self.encoder(src_encoded, src_mask)
+        output = self.decoder(tgt_encoded, memory, tgt_mask, src_mask)
+        
+        # Final linear layer
+        logits = self.output_layer(output)
+        
+        return logits
+
+class GPT2LikeModel(nn.Module):
+    """
+    GPT-2-like decoder-only transformer model for language modeling
+    """
+    def __init__(self, 
+                 vocab_size: int,
+                 d_model: int = 768, 
+                 num_heads: int = 12, 
+                 d_ff: int = 3072, 
+                 num_layers: int = 12,
+                 max_seq_length: int = 1024,
+                 dropout: float = 0.1,
+                 pad_idx: int = 0):
+        super().__init__()
+        
+        self.d_model = d_model
+        self.pad_idx = pad_idx
+        self.vocab_size = vocab_size
+        
+        # Token embeddings
+        self.token_embedding = nn.Embedding(vocab_size, d_model, padding_idx=pad_idx)
+        self.pos_embedding = nn.Embedding(max_seq_length, d_model)
+        
+        self.dropout = nn.Dropout(dropout)
+        
+        # Decoder layers (GPT-2 style)
+        self.layers = nn.ModuleList([
+            TransformerEncoderLayer(d_model, num_heads, d_ff, dropout)
+            for _ in range(num_layers)
+        ])
+        
+        self.norm = nn.LayerNorm(d_model)
+        
+        # Final linear layer tied with embedding weights
+        self.output_layer = nn.Linear(d_model, vocab_size, bias=False)
+        self.output_layer.weight = self.token_embedding.weight  # Weight tying
+        
+        # Initialize parameters
+        self._init_parameters()
+        
+    def _init_parameters(self):
+        """Initialize model parameters"""
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.normal_(p, mean=0.0, std=0.02)
+        
+    def create_causal_mask(self, size: int) -> torch.Tensor:
+        """
+        Create causal mask to prevent attention to future tokens
+        
+        Args:
+            size: Sequence length
+            
+        Returns:
+            Causal mask [1, 1, size, size]
+        """
+        mask = torch.triu(torch.full((size, size), float('-inf')), diagonal=1).unsqueeze(0).unsqueeze(0)
+        return mask
+    
+    def forward(self, x: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        Forward pass through the GPT-2-like model
+        
+        Args:
+            x: Input tokens [batch_size, seq_length]
+            labels: Optional target tokens for loss calculation
+            
+        Returns:
+            If labels provided: (loss, logits)
+            If no labels: logits [batch_size, seq_length, vocab_size]
+        """
+        batch_size, seq_length = x.size()
+        device = x.device
+        
+        # Get position indices
+        positions = torch.arange(0, seq_length, dtype=torch.long, device=device).unsqueeze(0).repeat(batch_size, 1)
+        
+        # Embed tokens and positions
+        token_embeddings = self.token_embedding(x)
+        position_embeddings = self.pos_embedding(positions)
+        
+        # Combine embeddings
+        x = self.dropout(token_embeddings + position_embeddings)
+        
+        # Create causal mask
+        mask = self.create_causal_mask(seq_length).to(device)
+        
+        # Pass through transformer layers
+        for layer in self.layers:
+            x = layer(x, mask)
+        
+        x = self.norm(x)
+        logits = self.output_layer(x)
+        
+        # If labels provided, calculate loss
+        if labels is not None:
+            loss_fct = nn.CrossEntropyLoss(ignore_index=self.pad_idx)
+            loss = loss_fct(logits.view(-1, self.vocab_size), labels.view(-1))
+            return loss, logits
+        
+        return logits
+
+    def generate(self, 
+                 input_ids: torch.Tensor, 
+                 max_length: int = 50,
+                 temperature: float = 1.0,
+                 top_k: Optional[int] = None,
+                 top_p: Optional[float] = None,
+                 do_sample: bool = True) -> torch.Tensor:
+        """
+        Generate text using the model
+        
+        Args:
+            input_ids: Input token ids [batch_size, seq_length]
+            max_length: Maximum sequence length to generate
+            temperature: Sampling temperature (lower = more focused, higher = more diverse)
+            top_k: If specified, limit sampling to top k most likely tokens
+            top_p: If specified, limit sampling to tokens with cumulative probability > top_p
+            do_sample: If True, sample according to probabilities; if False, use greedy decoding
+            
+        Returns:
+            Generated token ids [batch_size, seq_length]
+        """
+        batch_size = input_ids.size(0)
+        generated = input_ids.clone()
+        
+        with torch.no_grad():
+            for _ in range(max_length):
+                # Get predictions for next token (use only the last 1024 tokens if sequence is too long)
+                outputs = self.forward(generated[:, -1024:])
+                next_token_logits = outputs[:, -1, :].unsqueeze(1)  # [batch_size, 1, vocab_size]
+                
+                # Apply temperature
+                next_token_logits = next_token_logits / temperature
+                
+                # Apply top-k filtering
+                if top_k is not None:
+                    indices_to_remove = next_token_logits < torch.topk(next_token_logits, top_k)[0][..., -1, None]
+                    next_token_logits[indices_to_remove] = float('-inf')
+                
+                # Apply top-p (nucleus) filtering
+                if top_p is not None:
+                    sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
+                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                    
+                    # Remove tokens with cumulative probability above the threshold
+                    sorted_indices_to_remove = cumulative_probs > top_p
+                    # Shift the indices to the right to keep the first token above the threshold
+                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                    sorted_indices_to_remove[..., 0] = 0
+                    
+                    # Scatter sorted tensors to original indexing
+                    indices_to_remove = sorted_indices_to_remove.scatter(-1, sorted_indices, sorted_indices_to_remove)
+                    next_token_logits[indices_to_remove] = float('-inf')
+                
+                # Convert logits to probabilities
+                probs = F.softmax(next_token_logits, dim=-1)
+                
+                # Sample from the probability distribution or take argmax
+                if do_sample:
+                    next_tokens = torch.multinomial(probs.squeeze(1), 1)
+                else:
+                    next_tokens = torch.argmax(probs, dim=-1)
+                
+                # Append new tokens to the sequence
+                generated = torch.cat([generated, next_tokens], dim=1)
+                
+                # Check if all sequences have hit EOS token (if you're using one)
+                # If using an EOS token, uncomment and adapt this code:
+                # eos_token_id = tokenizer.eos_token_id
+                # if (generated[:, -1] == eos_token_id).all():
+                #     break
+                
+        return generated
+
+class TextDataset(Dataset):
+    """
+    Dataset for language modeling
+    """
+    def __init__(self, 
+                 texts: List[str], 
+                 tokenizer,
+                 max_length: int = 512,
+                 stride: int = 256):
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.stride = stride
+        
+        # Tokenize all texts
+        self.examples = []
+        
+        for text in tqdm(texts, desc="Processing dataset"):
+            tokenized = self.tokenizer.encode(text)
+            
+            # Create chunks of max_length with overlap of stride
+            for i in range(0, len(tokenized) - 1, stride):
+                end = min(i + max_length, len(tokenized))
+                
+                if end - i < max_length // 2:  # Skip chunks that are too small
+                    continue
+                
+                chunk = tokenized[i:end]
+                input_ids = chunk[:-1]  # Input: all tokens except last
+                labels = chunk[1:]  # Labels: all tokens except first (shifted by 1)
+                
+                # Pad sequences if needed
+                if len(input_ids) < max_length - 1:
+                    input_ids = input_ids + [self.tokenizer.pad_token_id] * (max_length - 1 - len(input_ids))
+                    labels = labels + [self.tokenizer.pad_token_id] * (max_length - 1 - len(labels))
+                
+                self.examples.append({
+                    "input_ids": input_ids,
+                    "labels": labels
+                })
+    
+    def __len__(self) -> int:
+        return len(self.examples)
+    
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        example = self.examples[idx]
+        return {
+            "input_ids": torch.tensor(example["input_ids"], dtype=torch.long),
+            "labels": torch.tensor(example["labels"], dtype=torch.long)
+        }
+
+class SimpleTokenizer:
+    """
+    Simple tokenizer that splits text into characters or words
+    """
+    def __init__(self, 
+                 texts: List[str] = None, 
+                 vocab_size: int = 10000, 
+                 char_level: bool = False,
+                 min_freq: int = 2):
+        self.char_level = char_level
+        self.vocab_size = vocab_size
+        self.min_freq = min_freq
+        
+        # Special tokens
+        self.pad_token = "<pad>"
+        self.unk_token = "<unk>"
+        self.eos_token = "<eos>"
+        self.bos_token = "<bos>"
+        
+        self.pad_token_id = 0
+        self.unk_token_id = 1
+        self.eos_token_id = 2
+        self.bos_token_id = 3
+        
+        # Build vocabulary if texts are provided
+        if texts:
+            self.build_vocab(texts)
+        else:
+            self.token2id = {
+                self.pad_token: self.pad_token_id,
+                self.unk_token: self.unk_token_id,
+                self.eos_token: self.eos_token_id,
+                self.bos_token: self.bos_token_id
+            }
+            self.id2token = {v: k for k, v in self.token2id.items()}
+            
+    def tokenize(self, text: str) -> List[str]:
+        """
+        Tokenize text into list of tokens
+        """
+        if self.char_level:
+            return list(text)
+        else:
+            # Simple whitespace tokenization
+            return text.split()
+    
+    def build_vocab(self, texts: List[str]):
+        """
+        Build vocabulary from list of texts
+        """
+        # Count token frequencies
+        counter = Counter()
+        
+        for text in tqdm(texts, desc="Building vocabulary"):
+            tokens = self.tokenize(text)
+            counter.update(tokens)
+        
+        # Filter by frequency and limit vocabulary size
+        vocab = [token for token, count in counter.most_common(self.vocab_size - 4) 
+                if count >= self.min_freq]
+        
+        # Create token-to-id mappings
+        self.token2id = {
+            self.pad_token: self.pad_token_id,
+            self.unk_token: self.unk_token_id,
+            self.eos_token: self.eos_token_id,
+            self.bos_token: self.bos_token_id
+        }
+        
+        for i, token in enumerate(vocab):
+            self.token2id[token] = i + 4
+        
+        self.id2token = {v: k for k, v in self.token2id.items()}
+        
+        print(f"Vocabulary size: {len(self.token2id)}")
+    
+    def encode(self, text: str, add_special_tokens: bool = True) -> List[int]:
+        """
+        Convert text to list of token ids
+        """
+        tokens = self.tokenize(text)
+        
+        if add_special_tokens:
+            tokens = [self.bos_token] + tokens + [self.eos_token]
+        
+        # Convert tokens to ids
+        ids = [self.token2id.get(token, self.unk_token_id) for token in tokens]
+        return ids
+    
+    def decode(self, ids: List[int], skip_special_tokens: bool = True) -> str:
+        """
+        Convert list of token ids back to text
+        """
+        special_ids = {self.pad_token_id, self.unk_token_id, self.eos_token_id, self.bos_token_id} if skip_special_tokens else set()
+        
+        # Convert ids to tokens
+        tokens = [self.id2token.get(idx, self.unk_token) for idx in ids if idx not in special_ids]
+        
+        # Join tokens
+        if self.char_level:
+            return ''.join(tokens)
+        else:
+            return ' '.join(tokens)
+    
+    def save(self, path: str):
+        """
+        Save tokenizer to file
+        """
+        with open(path, 'w') as f:
+            json.dump({
+                'token2id': self.token2id,
+                'char_level': self.char_level,
+                'vocab_size': self.vocab_size,
+                'min_freq': self.min_freq
+            }, f)
+    
+    @classmethod
+    def load(cls, path: str):
+        """
+        Load tokenizer from file
+        """
+        with open(path, 'r') as f:
+            data = json.load(f)
+        
+        tokenizer = cls(vocab_size=data['vocab_size'], char_level=data['char_level'], min_freq=data['min_freq'])
+        tokenizer.token2id = data['token2id']
+        tokenizer.id2token = {int(v): k for k, v in tokenizer.token2id.items()}
+        
+        return tokenizer
+
+def train_epoch(model, dataloader, optimizer, scheduler, device, clip_grad=1.0):
+    """Train model for one epoch"""
+    model.train()
+    total_loss = 0
+    total_tokens = 0
+    
+    progress_bar = tqdm(dataloader, desc="Training")
+    
+    for batch in progress_bar:
+        # Move batch to device
+        input_ids = batch["input_ids"].to(device)
+        labels = batch["labels"].to(device)
+        
+        # Forward pass
+        optimizer.zero_grad()
+        loss, _ = model(input_ids, labels)
+        
+        # Backward pass
+        loss.backward()
+        
+        # Gradient clipping
+        if clip_grad > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+        
+        # Update parameters
+        optimizer.step()
+        scheduler.step()
+        
+        # Track loss
+        batch_loss = loss.item()
+        batch_tokens = (labels != model.pad_idx).sum().item()
+        total_loss += batch_loss * batch_tokens
+        total_tokens += batch_tokens
+        
+        # Update progress bar
+        progress_bar.set_postfix({"loss": batch_loss, "ppl": math.exp(min(batch_loss, 20))})
+    
+    avg_loss = total_loss / total_tokens if total_tokens > 0 else float('inf')
+    perplexity = math.exp(min(avg_loss, 20))  # Cap perplexity to avoid overflow
+    
+    return avg_loss, perplexity
